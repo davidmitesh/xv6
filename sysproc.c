@@ -89,3 +89,24 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+
+int sys_exec_time(void)
+{
+    return Process_exec_time();
+}
+
+int sys_deadline(void)
+{
+    return Process_deadline();
+}
+
+// int sys_rate(void)
+// {
+//     return Process_rate();
+// }
+
+int sys_sched_policy(void)
+{
+  return Process_sched_policy();
+}

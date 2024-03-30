@@ -6,6 +6,7 @@
 #include "x86.h"
 #include "proc.h"
 #include "spinlock.h"
+#include <stddef.h>
 
 struct {
   struct spinlock lock;
@@ -13,11 +14,11 @@ struct {
 } ptable;
 
 static struct proc *initproc;
-
+// int u=0;
 int nextpid = 1;
 extern void forkret(void);
 extern void trapret(void);
-
+int sched_policy = -1;
 static void wakeup1(void *chan);
 
 void
@@ -88,6 +89,9 @@ allocproc(void)
 found:
   p->state = EMBRYO;
   p->pid = nextpid++;
+  p->sched_policy = -1;
+  p->last_tick = ticks;
+  p->elapsed_time = 0;
 
   release(&ptable.lock);
 
@@ -319,26 +323,111 @@ wait(void)
 //  - swtch to start running that process
 //  - eventually that process transfers control
 //      via swtch back to the scheduler.
+
+int abs(int a){
+  if(a < 0){
+    return -a;
+  }
+  return a;
+}
+
+int edf_priority(struct proc *p){
+  return abs(p->deadline + p->start_time);
+}
+
+// int rms_priority(struct proc *p){
+//   int numerator = (30 - p->rate)*3;
+//   int m = numerator % 29;
+//   int a = numerator / 29;
+//   if(a<1){
+//     return 1;
+//   }
+//   else if(m == 0){
+//     return a;
+//   }
+//   else{
+//     return a + 1;
+//   }
+// }
+
+// void
+// scheduler(void)
+// {
+//   struct proc *p;
+//   struct cpu *c = mycpu();
+//   c->proc = 0;
+  
+//   for(;;){
+//     // Enable interrupts on this processor.
+//     sti();
+
+//     // Loop over process table looking for process to run.
+//     acquire(&ptable.lock);
+//     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+//       if(p->state != RUNNABLE)
+//         continue;
+
+//       // Switch to chosen process.  It is the process's job
+//       // to release ptable.lock and then reacquire it
+//       // before jumping back to us.
+//       c->proc = p;
+//       switchuvm(p);
+//       p->state = RUNNING;
+
+//       swtch(&(c->scheduler), p->context);
+//       switchkvm();
+
+//       // Process is done running for now.
+//       // It should have changed its p->state before coming back.
+//       c->proc = 0;
+//     }
+//     release(&ptable.lock);
+
+//   }
+// }
+
 void
 scheduler(void)
 {
   struct proc *p;
   struct cpu *c = mycpu();
   c->proc = 0;
-  
   for(;;){
     // Enable interrupts on this processor.
     sti();
-
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
-    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-      if(p->state != RUNNABLE)
+    int earliest_deadline = 100000000, pid_to_sched = -10;
+    if (sched_policy == 0){
+      for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+        if(p->state != RUNNABLE || p->sched_policy != sched_policy)
+          continue;
+      
+        int time_left = p->arrival_time + p->deadline - ticks;
+        if (time_left < earliest_deadline)
+        {
+          earliest_deadline = time_left;
+          pid_to_sched = p->pid;
+        }
+        else if (time_left == earliest_deadline)
+        {
+          if (p->pid < pid_to_sched)
+            pid_to_sched = p->pid;
+        }
+      }
+      if (pid_to_sched == -10){
+        release(&ptable.lock);
         continue;
+      }
+      for (p = ptable.proc; p < &ptable.proc[NPROC]; p++)
+        if (p->pid == pid_to_sched)
+          break;
 
-      // Switch to chosen process.  It is the process's job
-      // to release ptable.lock and then reacquire it
-      // before jumping back to us.
+      if (p->state != RUNNABLE){
+        release(&ptable.lock);
+        continue;
+      }
+
       c->proc = p;
       switchuvm(p);
       p->state = RUNNING;
@@ -346,14 +435,59 @@ scheduler(void)
       swtch(&(c->scheduler), p->context);
       switchkvm();
 
+
+      // Increment run time of the running process
+        
+      // p->elapsed_time++;
+      if (ticks > p->last_tick)
+      {
+        p->last_tick = ticks;
+        p->elapsed_time++;
+      }
+
       // Process is done running for now.
       // It should have changed its p->state before coming back.
       c->proc = 0;
     }
-    release(&ptable.lock);
+    else
+    {
+       for (p = ptable.proc; p < &ptable.proc[NPROC]; p++)
+        {
+          if (p->state != RUNNABLE)
+            continue;
 
+          // cprintf("pid: %d\n", p->pid);
+
+          // Switch to chosen process.  It is the process's job
+          // to release ptable.lock and then reacquire it
+          // before jumping back to us.
+          c->proc = p;
+          switchuvm(p);
+          p->state = RUNNING;
+
+          swtch(&(c->scheduler), p->context);
+
+
+          switchkvm();
+
+          // Increment run time of the running process
+            // p->elapsed_time++;
+
+            if (ticks > p->last_tick)
+        {
+          p->last_tick = ticks;
+          p->elapsed_time++;
+        }
+
+          // Process is done running for now.
+          // It should have changed its p->state before coming back.
+          c->proc = 0;
+      }
+    }
+    release(&ptable.lock);
   }
 }
+
 
 // Enter scheduler.  Must hold only ptable.lock
 // and have changed proc->state. Saves and restores
@@ -531,4 +665,133 @@ procdump(void)
     }
     cprintf("\n");
   }
+}
+
+
+int Process_exec_time(void){
+  int pid, exec_time;
+  if (argint(0, &pid) < 0 || argint(1, &exec_time) < 0) {
+      return -1;
+  }
+  struct proc *p;
+  acquire(&ptable.lock);
+  for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+      if (p->pid == pid) {
+          p->exec_time = exec_time;
+          release(&ptable.lock);
+          return 0;
+      }
+  }
+  release(&ptable.lock);
+  return -22; // Invalid PID
+}
+
+int Process_deadline(void){
+  int pid, deadline;
+  if (argint(0, &pid) < 0 || argint(1, &deadline) < 0) {
+      return -1;
+  }
+  struct proc *p;
+  acquire(&ptable.lock);
+  for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+      if (p->pid == pid) {
+          p->deadline = deadline;
+          release(&ptable.lock);
+          return 0;
+      }
+  }
+  release(&ptable.lock);
+  return -22; // Invalid PID
+}
+
+// int Process_rate(void){
+//   int pid, rate;
+//   if (argint(0, &pid) < 0 || argint(1, &rate) < 0) {
+//       return -1;
+//   }
+//   struct proc *p;
+//   acquire(&ptable.lock);
+//   for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+//       if (p->pid == pid) {
+//           p->rate = rate;
+//           release(&ptable.lock);
+//           return 0;
+//       }
+//   }
+//   release(&ptable.lock);
+//   return -22; // Invalid PID
+// }
+
+
+int Process_sched_policy(void){
+  int pid, policy;
+  if (argint(0, &pid) < 0 || argint(1, &policy) < 0) {
+      return -1;
+  }
+  struct proc *p;
+  acquire(&ptable.lock);
+  // for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+      // if (p->pid == pid) {
+      //     int d = p->deadline;
+      //     int e = p->exec_time;
+      //     // int r = p->rate;
+      //     p->sched_policy = policy;
+      //     p->arrival_time = ticks;
+      //     release(&ptable.lock);
+      //     if(policy == 0){
+      //       u = u + (10000*e/d);
+      //       if(u > 10000){
+      //         kill(pid);
+      //         u = u - (10000*e/d);
+      //         return -22;
+      //       }
+      //       else{
+      //         return 0;
+      //       }
+      //     }
+          // else{
+          //   u = u + 100*e*r;
+          //   rms_no++;
+          //   if(u > rms_limit[rms_no - 1]){
+          //     kill(pid);
+          //     u = u - 100*e*r;
+          //     rms_no--;
+          //     return -22;
+          //   }
+          //   else{
+          //     return 0;
+          //   }
+          // }
+        
+      // }
+  for (p = ptable.proc; p < &ptable.proc[NPROC]; p++)
+    if (p->pid == pid)
+      break;
+
+  if (policy == 0){
+    int temp = (1000000 * p->exec_time) / p->deadline;
+    for (struct proc *p1 = ptable.proc; p1 < &ptable.proc[NPROC]; p1++)
+    {
+      if (p1->pid == 0)
+        continue;
+      // add the time left of all the processes which will start before p
+      if (p1->sched_policy == 0 && p->pid != p1->pid )
+      // should the process execution time not exceed 1000000?
+      
+       
+        temp += (1000000 * p1->exec_time) / p1->deadline;
+
+      if (temp > 1000000)
+      {
+        release(&ptable.lock);
+        kill(pid);
+        return -22;
+      }
+    }
+  }
+  p->arrival_time = ticks;
+  p->sched_policy = policy;  
+  sched_policy = policy; 
+  release(&ptable.lock);
+  return 0; // Invalid PID
 }
